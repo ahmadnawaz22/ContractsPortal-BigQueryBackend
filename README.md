@@ -1,6 +1,6 @@
 # ContractsPortal-BigQueryBackend
 Contracts portal connected to BigQueryData by Rana Ahmad Nawaz
-#Report Includes Contracts, Renewals and Invoices
+## Report Includes Contracts, Renewals and Invoices
 
 ## 1-Create a New Spreadsheet
 ## 2-Add Appscript
