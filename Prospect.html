@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>Customer Contracts</title>
+    <style>
+      :root { --pad:12px; --radius:12px; --line:#eaeaea; }
+      html, body { margin:0; padding:0; }
+      body { font-family: Arial, sans-serif; padding: var(--pad); font-size:14px; background:#3377FF; }
+      h2 { margin:0 0 12px; font-size:16px; }
+      .filter-row { display:flex; gap:8px; align-items:flex-end; margin-bottom:8px; }
+      .field { flex:1; min-width:160px; }
+      label { font-weight:600; display:block; margin:6px 0 4px; }
+      select, button { width:100%; padding:8px; margin:0 0 6px; border:1px solid #ddd; border-radius:8px; font-size:14px; background:#fff; }
+      button { cursor:pointer; }
+      button:disabled { opacity:.6; cursor:not-allowed; }
+      .spinner { display:none; font-size:12px; color:#666; margin:6px 0; }
+      .card { background:#fff; color:#111; border:1px solid var(--line); border-radius:var(--radius); padding:var(--pad); margin:10px 0; box-shadow:0 1px 2px rgba(0,0,0,.06); }
+      .contract-head{ display:grid; grid-template-columns: 1.2fr 1fr 1fr 1fr 1fr; gap:16px; background:#f5f5f5; border-radius:10px; padding:10px 12px; margin:8px 0 6px; }
+      .contract-head .label{ font-size:12px; color:#555; margin-bottom:2px; }
+      .contract-head .value{ font-size:14px; color:#111; font-weight:500; }
+      .contract-head .value.bold{ font-weight:700; }
+      .table-wrap { width:100%; overflow-x:auto; }
+      .table-fixed { width:100%; border-collapse:collapse; table-layout:fixed; }
+      .col-sub{width:36%} .col-comments{width:34%} .col-qty{width:10%} .col-price{width:10%} .col-amount{width:10%}
+      th, td { border-bottom:1px solid #eee; padding:6px 8px; text-align:left !important; font-size:13px; vertical-align:top; }
+      th { background:#fafafa; }
+      .total { font-weight:bold; }
+    </style>
+  </head>
+  <body>
+    <h2>Customer Contracts</h2>
+
+    <div class="filter-row">
+      <div class="field">
+        <label for="customerSel">Customer</label>
+        <select id="customerSel">
+          <option value="__all__">All Customers</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="amFilter">Account Manager</label>
+        <select id="amFilter">
+          <option value="__all__">All</option>
+        </select>
+      </div>
+    </div>
+
+    <button id="loadBtn" type="button">Load</button>
+    <div id="spinner" class="spinner">Loading…</div>
+
+    <div id="result" aria-live="polite"></div>
+
+    <script>
+      const ALL = "__all__";
+      const fmt = {
+        date(s){ if(!s) return ""; const d=new Date(s); return isNaN(d)? s : d.toLocaleDateString(undefined,{day:"2-digit",month:"short",year:"2-digit"}); },
+        num(n){ return (typeof n==="number"&&isFinite(n))? n.toLocaleString(): (n??""); },
+        money(n){ return (typeof n==="number"&&isFinite(n))? n.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}) : (n??""); }
+      };
+      const el = (id) => document.getElementById(id);
+      const customerSel = el("customerSel");
+      const amFilter    = el("amFilter");
+      const loadBtn     = el("loadBtn");
+      const spinner     = el("spinner");
+      const result      = el("result");
+
+      let allPayload = null;
+      let currentPayload = null;
+
+      function setLoading(is){ spinner.style.display = is? "block":"none"; loadBtn.disabled = is; customerSel.disabled = is; amFilter.disabled = is; }
+      function escapeHtml(s){ return String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#039;"); }
+
+      setLoading(true);
+      google.script.run
+        .withSuccessHandler(({customers}) => {
+          const items = customers || [];
+          customerSel.innerHTML =
+            `<option value="${ALL}">All Customers</option>` +
+            items.map(c => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join("");
+          customerSel.value = ALL;
+          loadAll();
+        })
+        .withFailureHandler(err => {
+          setLoading(false);
+          result.innerHTML = `<div class="card">Error loading customers: ${escapeHtml(err && err.message ? err.message : String(err))}</div>`;
+        })
+        .bootstrapCustomers();
+
+      customerSel.addEventListener("change", () => {
+        if (customerSel.value === ALL) loadAll(); else loadOne(customerSel.value);
+      });
+      loadBtn.addEventListener("click", () => {
+        if (customerSel.value === ALL) loadAll(); else loadOne(customerSel.value);
+      });
+      amFilter.addEventListener("change", () => {
+        if (customerSel.value === ALL) renderAll(allPayload); else renderOne(currentPayload);
+      });
+
+      function populateAMFromLines(lines){
+        const set = new Set();
+        lines.forEach(l => { const v = (l.accountManager || "").trim(); if (v) set.add(v); });
+        const ams = Array.from(set).sort((a,b)=>a.localeCompare(b));
+        amFilter.innerHTML = `<option value="${ALL}">All</option>` +
+          ams.map(v => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join("");
+        amFilter.value = ALL;
+      }
+
+      function loadAll(){
+        setLoading(true);
+        google.script.run
+          .withSuccessHandler(payload => {
+            allPayload = payload || { groups: [] };
+            const allLines = [];
+            (allPayload.groups || []).forEach(g => (g.contracts || []).forEach(c => allLines.push(...(c.lines || []))));
+            populateAMFromLines(allLines);
+            renderAll(allPayload);
+            setLoading(false);
+          })
+          .withFailureHandler(err => {
+            setLoading(false);
+            result.innerHTML = `<div class="card">Error: ${escapeHtml(err && err.message ? err.message : String(err))}</div>`;
+          })
+          .getAllCustomerContracts();
+      }
+
+      function loadOne(customer){
+        setLoading(true);
+        google.script.run
+          .withSuccessHandler(payload => {
+            currentPayload = payload || { contracts: [] };
+            const lines = [];
+            (currentPayload.contracts || []).forEach(c => lines.push(...(c.lines || [])));
+            populateAMFromLines(lines);
+            renderOne(currentPayload);
+            setLoading(false);
+          })
+          .withFailureHandler(err => {
+            setLoading(false);
+            result.innerHTML = `<div class="card">Error: ${escapeHtml(err && err.message ? err.message : String(err))}</div>`;
+          })
+          .getCustomerContracts(customer);
+      }
+
+      function headerStrip(c, extraColsHtml="") {
+        return `
+          <div class="contract-head">
+            <div><div class="label">Orderform</div><div class="value bold">${escapeHtml(c.orderformCode || "-")}</div></div>
+            ${extraColsHtml || `<div><div class="label">Ref.</div><div class="value">${escapeHtml(c.ref || "-")}</div></div>`}
+            <div><div class="label">Start</div><div class="value">${fmt.date(c.startDate)}</div></div>
+            <div><div class="label">End</div><div class="value">${fmt.date(c.endDate)}</div></div>
+            <div><div class="label">Payment Term</div><div class="value">${escapeHtml(c.paymentTerm || "-")}</div></div>
+          </div>`;
+      }
+      function tableFor(lines, total){
+        const rows = lines.map(l => `
+          <tr>
+            <td>${escapeHtml(l.subProduct || "-")}</td>
+            <td>${escapeHtml(l.comments || "")}</td>
+            <td>${fmt.num(Number(l.licenseOrdered))}</td>
+            <td>${fmt.money(Number(l.price))}</td>
+            <td>${fmt.money(Number(l.amount))}</td>
+          </tr>`).join("");
+        return `
+          <div class="table-wrap">
+            <table class="table-fixed">
+              <colgroup>
+                <col class="col-sub"><col class="col-comments"><col class="col-qty"><col class="col-price"><col class="col-amount">
+              </colgroup>
+              <thead>
+                <tr><th>SubProduct</th><th>Comments</th><th>License Ordered</th><th>Price</th><th>Amount</th></tr>
+              </thead>
+              <tbody>${rows}</tbody>
+              <tfoot><tr class="total"><td colspan="4">Contract Total</td><td>${fmt.money(total)}</td></tr></tfoot>
+            </table>
+          </div>`;
+      }
+
+      function renderOne(data) {
+        const selAM = amFilter.value || ALL;
+        if (!data || !Array.isArray(data.contracts) || data.contracts.length === 0) {
+          result.innerHTML = `<div class="card">No contracts found.</div>`; return;
+        }
+        const parts = [];
+        data.contracts.forEach(c => {
+          const lines = (c.lines || []);
+          const visible = (selAM === ALL) ? lines : lines.filter(l => (l.accountManager || "") === selAM);
+          if (!visible.length) return;
+          const total = visible.reduce((s,l)=> s + (Number(l.amount)||0), 0);
+          parts.push(
+            `<details class="card" open>
+               <summary>${escapeHtml(c.orderformCode || "-")} — ${fmt.date(c.startDate)} → ${fmt.date(c.endDate)}</summary>
+               ${headerStrip(c)}
+               ${tableFor(visible, total)}
+             </details>`
+          );
+        });
+        result.innerHTML = parts.join("") || `<div class="card">No matching rows for the selected Account Manager.</div>`;
+      }
+
+      function renderAll(payload) {
+        const selAM = amFilter.value || ALL;
+        const groups = (payload && payload.groups) ? payload.groups : [];
+        if (!groups.length) { result.innerHTML = `<div class="card">No contracts found.</div>`; return; }
+
+        const parts = [];
+        groups.forEach(g => {
+          (g.contracts || []).forEach(c => {
+            const lines = (c.lines || []);
+            const visible = (selAM === ALL) ? lines : lines.filter(l => (l.accountManager || "") === selAM);
+            if (!visible.length) return;
+            const total = visible.reduce((s,l)=> s + (Number(l.amount)||0), 0);
+
+            const customerCol = `
+              <div><div class="label">Customer</div>
+                   <div class="value">${escapeHtml(g.customer || "-")}${g.clientId ? ` <span class="value" style="font-weight:400; color:#333">(${escapeHtml(g.clientId)})</span>` : ``}
+                   </div></div>`;
+
+            parts.push(
+              `<details class="card" open>
+                 <summary>${escapeHtml(g.customer || "-")} — ${escapeHtml(c.orderformCode || "-")} — ${fmt.date(c.startDate)} → ${fmt.date(c.endDate)}</summary>
+                 ${headerStrip(c, customerCol)}
+                 ${tableFor(visible, total)}
+               </details>`
+            );
+          });
+        });
+        result.innerHTML = parts.join("") || `<div class="card">No matching rows for the selected filters.</div>`;
+      }
+    </script>
+  </body>
+</html>
