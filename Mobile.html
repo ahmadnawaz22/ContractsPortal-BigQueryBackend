@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Contracts Hub (Mobile)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+  <style>
+    :root { --bg:#f7f7fb; --card:#fff; --line:#e9e9ef; --text:#111; --muted:#666; --accent:#1f7aec; --pad:12px; --radius:14px; }
+    html,body{margin:0;padding:0;background:var(--bg);color:var(--text);font-family:system-ui, Arial, sans-serif;}
+    .topbar{position:sticky;top:0;z-index:20;background:#fff;border-bottom:1px solid var(--line);}
+    .tabs{display:flex;gap:4px;padding:8px;max-width:980px;margin:0 auto;}
+    .tab{flex:1;text-align:center;padding:10px;border:1px solid var(--line);border-radius:10px;background:#fff;font-weight:600;cursor:pointer;}
+    .tab.active{background:var(--accent);color:#fff;border-color:var(--accent);}
+    .wrap{max-width:980px;margin:0 auto;padding:12px;}
+    .filters{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 8px;}
+    .field{flex:1;min-width:180px}
+    label{display:block;font-size:12px;color:var(--muted);margin:4px 0}
+    select{width:100%;padding:10px;border:1px solid var(--line);border-radius:10px;background:#fff;}
+    .card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:var(--pad);margin:10px 0;box-shadow:0 1px 2px rgba(0,0,0,.06);}
+    .hdr{display:grid;gap:8px;grid-template-columns:1fr 1fr; font-size:13px;margin-bottom:8px}
+    .hdr div b{display:block;font-size:12px;color:#333;margin-bottom:2px}
+    .table-wrap{overflow-x:auto}
+    table{width:100%;border-collapse:collapse;table-layout:fixed}
+    th,td{border-bottom:1px solid var(--line);padding:8px;text-align:left;vertical-align:top;font-size:13px}
+    th{background:#fafafa}
+    .total{font-weight:700}
+    .muted{color:var(--muted);font-size:12px;margin:6px 0}
+    .spinner{font-size:12px;color:var(--muted);margin:8px 0}
+    @media (min-width:680px){ .hdr{grid-template-columns:repeat(5,1fr)} }
+    .diag { display: none !important; }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="tabs">
+      <div class="tab" id="tab-contracts">Contracts</div>
+      <div class="tab" id="tab-renewals">Renewals</div>
+      <div class="tab" id="tab-invoices">Invoices</div>
+    </div>
+  </div>
+
+  <div class="wrap">
+    <!-- CONTRACTS -->
+    <section id="view-contracts" hidden>
+      <div class="filters">
+        <div class="field">
+          <label>Customer</label>
+          <select id="c_cust"><option value="__all__">All Customers</option></select>
+        </div>
+        <div class="field">
+          <label>Account Manager</label>
+          <select id="c_am"><option value="__all__">All</option></select>
+        </div>
+      </div>
+      <div class="spinner" id="c_spin" style="display:none">Loading…</div>
+      <div id="c_out"></div>
+    </section>
+
+    <!-- RENEWALS -->
+    <section id="view-renewals" hidden>
+      <div class="filters">
+        <div class="field">
+          <label>Customer</label>
+          <select id="r_cust"><option value="__all__">All Customers</option></select>
+        </div>
+        <div class="field">
+          <label>Account Manager</label>
+          <select id="r_am"><option value="__all__">All</option></select>
+        </div>
+      </div>
+      <div class="spinner" id="r_spin" style="display:none">Loading…</div>
+      <div id="r_out"></div>
+    </section>
+
+    <!-- INVOICES -->
+    <section id="view-invoices" hidden>
+      <div class="filters">
+        <div class="field"><label>Risk</label><select id="i_risk"></select></div>
+        <div class="field"><label>Status</label><select id="i_tier"></select></div>
+        <div class="field"><label>Customer</label><select id="i_cust"></select></div>
+        <div class="field"><label>Account Manager</label><select id="i_am"></select></div>
+      </div>
+      <div class="spinner" id="i_spin" style="display:none">Loading…</div>
+      <div id="i_note" class="muted"></div>
+      <div id="i_out"></div>
+    </section>
+  </div>
+
+  <script>
+    const $ = id => document.getElementById(id);
+    function loadSaved(ns, cb){
+      google.script.run.withSuccessHandler(s => cb(s || {}))
+                      .withFailureHandler(() => cb({}))
+                      .loadFilterState(ns);
+    }
+    function saveSaved(ns, obj){ google.script.run.saveFilterState(ns, obj); }
+
+    const ALL="__all__", RISK_EXPECTED="__expected__";
+    const fmt = {
+      date(s){ if(!s) return ""; const d=new Date(s); return isNaN(d)? s : d.toLocaleDateString(undefined,{day:"2-digit",month:"short",year:"2-digit"}); },
+      money(n){ return (typeof n==="number"&&isFinite(n))? n.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}) : (n??""); },
+      num(n){ return (typeof n==="number"&&isFinite(n))? n.toLocaleString() : (n??""); }
+    };
+    function esc(s){ return String(s??"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#039;"); }
+    function setOptions(sel, items, selected){
+      sel.innerHTML = items.map(o=>`<option value="${esc(o.value)}"${o.value===selected?' selected':''}>${esc(o.label)}</option>`).join('');
+      if (selected && sel.value!==selected) sel.value = selected;
+    }
+    function cardError(err){
+      const m = err && err.message ? err.message : String(err);
+      return `<div class="card"><div style="color:#b00020;font-weight:600">Error</div><div>${esc(m)}</div></div>`;
+    }
+
+    const tabs = {
+      contracts: { tab: 'tab-contracts', view: 'view-contracts', load: loadContracts },
+      renewals:  { tab: 'tab-renewals',  view: 'view-renewals',  load: loadRenewals  },
+      invoices:  { tab: 'tab-invoices',  view: 'view-invoices',  load: loadInvoices  }
+    };
+    var C_DATA=null, R_DATA=null, I_DATA=null, I_DBG=null;
+
+    function activate(name){
+      Object.entries(tabs).forEach(([k,v])=>{
+        $(v.tab).classList.toggle('active', k===name);
+        $(v.view).hidden = (k!==name);
+      });
+      tabs[name].load();
+      const u = new URL(window.location.href);
+      u.searchParams.set('view', name);
+      history.replaceState(null, '', u.toString());
+    }
+    Object.entries(tabs).forEach(([k,v])=>$(v.tab).addEventListener('click', ()=>activate(k)));
+    (function init(){
+      const wanted = '<?= initialView ?>';
+      activate(wanted && tabs[wanted] ? wanted : 'contracts');
+    })();
+
+    function loadContracts(){
+      if (C_DATA) return;
+      const spin = $('c_spin'); spin.style.display='block';
+      google.script.run
+        .withSuccessHandler(payload=>{
+          spin.style.display='none';
+          C_DATA = payload || { groups: [] };
+          buildContractsFilters();
+          renderContracts();
+        })
+        .withFailureHandler(err=>{
+          spin.style.display='none';
+          $('c_out').innerHTML = cardError(err);
+        })
+        .getAllCustomerContracts();
+    }
+    function buildContractsFilters(){
+      const custSel = $('c_cust'); const amSel = $('c_am');
+      const customers = (C_DATA.groups||[]).map(g=>g.customer).sort((a,b)=>a.localeCompare(b));
+      custSel.innerHTML = `<option value="${ALL}">All Customers</option>` + customers.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('');
+      const set = new Set();
+      (C_DATA.groups||[]).forEach(g => (g.contracts||[]).forEach(c => (c.lines||[]).forEach(l => { if (l.accountManager) set.add(l.accountManager); })));
+      const ams = Array.from(set).sort((a,b)=>a.localeCompare(b));
+      amSel.innerHTML = `<option value="${ALL}">All</option>` + ams.map(a=>`<option value="${esc(a)}">${esc(a)}</option>`).join('');
+      custSel.onchange = renderContracts; amSel.onchange = renderContracts;
+    }
+    function renderContracts(){
+      const cust = $('c_cust').value || ALL;
+      const am   = $('c_am').value   || ALL;
+      const out  = $('c_out');
+      const parts = [];
+      (C_DATA.groups||[]).forEach(g => {
+        if (cust!==ALL && g.customer!==cust) return;
+        (g.contracts||[]).forEach(c => {
+          const lines = (c.lines||[]).filter(l => am===ALL || (l.accountManager||"")===am);
+          if (!lines.length) return;
+          const total = lines.reduce((s,l)=>s+(Number(l.amount)||0),0);
+          parts.push(`
+            <div class="card">
+              <div class="hdr">
+                <div><b>Customer</b>${esc(g.customer)}${g.clientId?` <span class="muted">(${esc(g.clientId)})</span>`:''}</div>
+                <div><b>Orderform</b>${esc(c.orderformCode||'-')}</div>
+                <div><b>Start</b>${fmt.date(c.startDate)}</div>
+                <div><b>End</b>${fmt.date(c.endDate)}</div>
+                <div><b>Payment Term</b>${esc(c.paymentTerm||'-')}</div>
+              </div>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>SubProduct</th><th>Comments</th><th>Qty</th><th>Price</th><th>Amount</th></tr></thead>
+                  <tbody>
+                    ${lines.map(l=>`<tr>
+                      <td>${esc(l.subProduct||'-')}</td>
+                      <td>${esc(l.comments||'')}</td>
+                      <td>${fmt.num(l.licenseOrdered)}</td>
+                      <td>${fmt.money(l.price)}</td>
+                      <td>${fmt.money(l.amount)}</td>
+                    </tr>`).join('')}
+                  </tbody>
+                  <tfoot><tr class="total"><td colspan="4">Contract Total</td><td>${fmt.money(total)}</td></tr></tfoot>
+                </table>
+              </div>
+            </div>`);
+        });
+      });
+      out.innerHTML = parts.join('') || `<div class="muted">No contracts match the selected filters.</div>`;
+    }
+
+    function loadRenewals(){
+      if (R_DATA) return;
+      const spin = $('r_spin'); spin.style.display='block';
+      google.script.run
+        .withSuccessHandler(payload=>{
+          spin.style.display='none';
+          R_DATA = payload || { contracts: [] };
+          buildRenewalsFilters();
+          renderRenewals();
+        })
+        .withFailureHandler(err=>{
+          spin.style.display='none';
+          $('r_out').innerHTML = cardError(err);
+        })
+        .getUnsignedProspectContracts(true);
+    }
+    function buildRenewalsFilters(){
+      const custSel = $('r_cust'); const amSel = $('r_am');
+      const setC = new Set(), setA = new Set();
+      (R_DATA.contracts||[]).forEach(c=>{
+        if (c.customer) setC.add(c.customer);
+        (c.lines||[]).forEach(l=>{ if(l.accountManager) setA.add(l.accountManager); });
+      });
+      const customers = Array.from(setC).sort((a,b)=>a.localeCompare(b));
+      const ams = Array.from(setA).sort((a,b)=>a.localeCompare(b));
+      custSel.innerHTML = `<option value="${ALL}">All Customers</option>` + customers.map(c=>`<option value="${esc(c)}">${esc(c)}</option>`).join('');
+      amSel.innerHTML   = `<option value="${ALL}">All</option>` + ams.map(a=>`<option value="${esc(a)}">${esc(a)}</option>`).join('');
+      custSel.onchange = renderRenewals; amSel.onchange = renderRenewals;
+    }
+    function renderRenewals(){
+      const cust = $('r_cust').value || ALL;
+      const am   = $('r_am').value   || ALL;
+      const out  = $('r_out');
+      const parts = [];
+      (R_DATA.contracts||[]).forEach(c=>{
+        if (cust!==ALL && c.customer!==cust) return;
+        const vis = (c.lines||[]).filter(l=> am===ALL || (l.accountManager||"")===am);
+        if (!vis.length) return;
+        const total = vis.reduce((s,l)=>s+(Number(l.amount)||0),0);
+        parts.push(`
+          <div class="card">
+            <div class="hdr">
+              <div><b>Client</b>${esc(c.customer||'-')}${c.clientId?` <span class="muted">(${esc(c.clientId)})</span>`:''}</div>
+              <div><b>Renewal Date</b>${fmt.date(c.startDate)}</div>
+              <div><b>Contract Value</b>${fmt.money(total)}</div>
+              <div><b>Orderform</b>${esc(c.orderformCode||'-')}</div>
+              <div><b>End</b>${fmt.date(c.endDate)}</div>
+            </div>
+            <div class="table-wrap">
+              <table>
+                <thead><tr><th>SubProduct</th><th>Comments</th><th>Qty</th><th>Price</th><th>Amount</th></tr></thead>
+                <tbody>
+                  ${vis.map(l=>`<tr>
+                    <td>${esc(l.subProduct||'-')}</td>
+                    <td>${esc(l.comments||'')}</td>
+                    <td>${fmt.num(l.licenseOrdered)}</td>
+                    <td>${fmt.money(l.price)}</td>
+                    <td>${fmt.money(l.amount)}</td>
+                  </tr>`).join('')}
+                </tbody>
+                <tfoot><tr class="total"><td colspan="4">Contract Total</td><td>${fmt.money(total)}</td></tr></tfoot>
+              </table>
+            </div>
+          </div>`);
+      });
+      out.innerHTML = parts.join('') || `<div class="muted">No renewals match the selected filters.</div>`;
+    }
+
+    function loadInvoices(){
+      if (I_DATA) return;
+      const spin = $('i_spin'); spin.style.display='block';
+      google.script.run
+        .withSuccessHandler(payload=>{
+          spin.style.display='none';
+          I_DATA = (payload && payload.invoices) ? payload.invoices : [];
+          I_DBG  = payload && payload.debug ? payload.debug : null;
+          if (!I_DATA.length && I_DBG) $('i_note').textContent =
+            `No Issued=Yes invoices. Source: ${I_DBG.dataset}.${I_DBG.table} @ ${I_DBG.projectId}. Rows scanned: ${I_DBG.totalRows}.`;
+          initInvoiceFilters();
+          renderInvoices();
+        })
+        .withFailureHandler(err=>{
+          spin.style.display='none';
+          $('i_out').innerHTML = cardError(err);
+        })
+        .getInvoicesIssued();
+    }
+    function initInvoiceFilters(){
+      const riskSel = $('i_risk'); const tierSel = $('i_tier'); const custSel = $('i_cust'); const amSel = $('i_am');
+      setOptions(riskSel, [{value:ALL,label:'All'},{value:RISK_EXPECTED,label:'Expected'},{value:'Doubtful',label:'Doubtful'}], RISK_EXPECTED);
+      setOptions(tierSel, [{value:'Receivable',label:'Receivable'},{value:ALL,label:'All'}], 'Receivable');
+      refreshInvoiceDependentOptions();
+      [riskSel,tierSel,custSel,amSel].forEach(el=>el.addEventListener('change', ()=>{ refreshInvoiceDependentOptions(); renderInvoices(); }));
+    }
+    function refreshInvoiceDependentOptions(){
+      const sel = invoiceSelection(); const custSel = $('i_cust'); const amSel = $('i_am');
+      const baseForCustomer = invFilter({...sel, customer:ALL});
+      const cs = Array.from(new Set(baseForCustomer.map(r=>r.customer).filter(Boolean))).sort((a,b)=>a.localeCompare(b));
+      setOptions(custSel, [{value:ALL,label:"All Customers"}, ...cs.map(v=>({value:v,label:v}))], custSel.value||ALL);
+      const baseForAM = invFilter({...sel, am:ALL});
+      const as = Array.from(new Set(baseForAM.map(r=>r.accountManager).filter(Boolean))).sort((a,b)=>a.localeCompare(b));
+      setOptions(amSel, [{value:ALL,label:"All"}, ...as.map(v=>({value:v,label:v}))], amSel.value||ALL);
+    }
+    function invoiceSelection(){
+      return {
+        risk: $('i_risk').value || ALL,
+        tier: $('i_tier').value || 'Receivable',
+        customer: $('i_cust').value || ALL,
+        am: $('i_am').value || ALL
+      };
+    }
+    function invFilter(sel){
+      return (I_DATA||[]).filter(r=>{
+        if (sel.risk && sel.risk!==ALL) {
+          if (sel.risk===RISK_EXPECTED) { if ((r.risk||"")!=="") return false; }
+          else if (r.risk !== sel.risk) return false;
+        }
+        if (sel.tier && sel.tier!==ALL && r.tier !== sel.tier) return false;
+        if (sel.customer && sel.customer!==ALL && r.customer !== sel.customer) return false;
+        if (sel.am && sel.am!==ALL && r.accountManager !== sel.am) return false;
+        return true;
+      });
+    }
+    function renderInvoices(){
+      const rows = invFilter(invoiceSelection());
+      const out = $('i_out');
+      if (!rows.length) { out.innerHTML = `<div class="muted">No invoices match the selected filters.</div>`; return; }
+      const byC = new Map(); rows.forEach(r=>{ if(!byC.has(r.customer)) byC.set(r.customer, []); byC.get(r.customer).push(r); });
+      const parts = [];
+      Array.from(byC.keys()).sort((a,b)=>a.localeCompare(b)).forEach(cust=>{
+        const list = byC.get(cust).slice().sort((a,b)=>(a.dueDate||"").localeCompare(b.dueDate||""));
+        parts.push(`<div class="card">
+          <div class="hdr"><div><b>Customer</b>${esc(cust)}</div></div>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Invoice Number</th><th>Contract</th><th>Issue Date</th><th>Due Date</th><th>Description</th><th>Amount USD</th><th>Balance</th></tr></thead>
+            <tbody>${list.map(r=>`<tr><td>${esc(r.invoiceNumber)}</td><td>${esc(r.contract)}</td><td>${fmt.date(r.issueDate)}</td><td>${fmt.date(r.dueDate)}</td><td>${esc(r.description)}</td><td>${fmt.money(r.amountUSD)}</td><td class="total">${fmt.money(r.balance)}</td></tr>`).join('')}</tbody>
+          </table></div>
+        </div>`);
+      });
+      out.innerHTML = parts.join('');
+    }
+  </script>
+</body>
+</html>
