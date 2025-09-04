@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Invoices</title>
+  <style>
+    :root { --pad:12px; --line:#eaeaea; --radius:12px; }
+    html, body { margin:0; padding:0; }
+    body { font-family: Arial, sans-serif; font-size:14px; padding: var(--pad); background:#3377FF; color:#111; }
+    h2 { margin:0 0 12px; font-size:18px; }
+    .filters { display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end; margin-bottom:8px; }
+    .field { min-width:180px; flex:1; }
+    label { display:block; font-weight:600; margin:6px 0 4px; }
+    select { width:100%; padding:8px; border:1px solid #ddd; border-radius:8px; background:#fff; font-size:14px; }
+    .spinner { font-size:12px; color:#666; margin:6px 0; display:none; }
+    .card { background:#fff; border:1px solid var(--line); border-radius:var(--radius); padding:var(--pad);
+            margin:10px 0; box-shadow:0 1px 2px rgba(0,0,0,.06); }
+    .card h3 { margin:0 0 8px; font-size:16px; }
+    .table-wrap { width:100%; overflow-x:auto; }
+    table { width:100%; border-collapse:collapse; table-layout:fixed; }
+    th, td { border-bottom:1px solid #eee; padding:6px 8px; text-align:left; vertical-align:top; font-size:13px; }
+    th { background:#fafafa; }
+    .col-inv{width:16%} .col-ctr{width:16%} .col-iss{width:12%} .col-due{width:12%} .col-desc{width:30%} .col-amt{width:7%} .col-bal{width:7%}
+    th.balance, td.balance { font-weight:700; }
+    .note { font-size:12px; color:#555; margin:4px 0 8px; }
+  </style>
+</head>
+<body>
+  <h2>Invoices</h2>
+
+  <div class="filters">
+    <div class="field"><label for="riskSel">Risk</label><select id="riskSel"></select></div>
+    <div class="field"><label for="tierSel">Status</label><select id="tierSel"></select></div>
+    <div class="field"><label for="customerSel">Customer</label><select id="customerSel"></select></div>
+    <div class="field"><label for="amSel">Account Manager</label><select id="amSel"></select></div>
+  </div>
+
+  <div id="spinner" class="spinner">Loading…</div>
+  <div id="note" class="note"></div>
+  <div id="result" aria-live="polite"></div>
+
+  <script>
+    /* ---------- DOM ---------- */
+    const $ = id => document.getElementById(id);
+    const riskSel = $('riskSel'), tierSel = $('tierSel'), customerSel = $('customerSel'), amSel = $('amSel');
+    const spinner = $('spinner'), result = $('result'), note = $('note');
+
+    /* ---------- Constants ---------- */
+    const ALL = "__all__";
+    const RISK_EXPECTED = "__expected__";   // means Risk is blank
+
+    /* ---------- State ---------- */
+    let full = [];   // all rows
+    let dbg  = null; // debug payload from server
+    let SAVED = null;
+
+    /* ---------- Utils ---------- */
+    const fmt = {
+      date(s){ if(!s) return ""; const d=new Date(s); return isNaN(d)? s : d.toLocaleDateString(undefined,{day:"2-digit",month:"short",year:"2-digit"}); },
+      money(n){ return (typeof n==="number"&&isFinite(n)) ? n.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2}) : (n??""); }
+    };
+    const esc  = s => String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;").replace(/'/g,"&#039;");
+    const trim = s => String(s ?? '').trim();
+    const uniqSorted = arr => Array.from(new Set(arr.map(trim))).filter(v => v !== '').sort((a,b)=>a.localeCompare(b));
+
+    function setOptions(selectEl, items, selected){
+      const sel = trim(selected ?? '');
+      selectEl.innerHTML = items.map(o => {
+        const v = trim(o.value);
+        return `<option value="${esc(v)}"${v===sel ? " selected":""}>${esc(o.label)}</option>`;
+      }).join("");
+      if (sel && trim(selectEl.value) !== sel) selectEl.value = sel;
+    }
+    function includesValue(items, v){ const tv = trim(v); return items.some(o => trim(o.value) === tv); }
+
+    /* ---------- Selection & Filtering ---------- */
+    function currentSelection(){
+      return {
+        risk: trim(riskSel.value || RISK_EXPECTED),     // default Expected
+        tier: trim(tierSel.value || 'Receivable'),      // default Receivable
+        customer: trim(customerSel.value || ALL),
+        am: trim(amSel.value || ALL)
+      };
+    }
+
+    function filterRows(sel){
+      const rSel = {
+        risk: sel.risk ?? RISK_EXPECTED,
+        tier: sel.tier ?? 'Receivable',
+        customer: sel.customer ?? ALL,
+        am: sel.am ?? ALL
+      };
+      return full.filter(r => {
+        const rRisk = trim(r.risk);
+        const rTier = trim(r.tier);
+        const rCust = trim(r.customer);
+        const rAM   = trim(r.accountManager);
+
+        // Risk
+        if (rSel.risk !== ALL) {
+          if (rSel.risk === RISK_EXPECTED) {
+            if (rRisk !== '') return false;          // Expected = blank
+          } else if (rRisk !== rSel.risk) return false;
+        }
+        // Status / Tier
+        if (rSel.tier !== ALL && rTier !== rSel.tier) return false;
+        // Customer (ClientID per mapping)
+        if (rSel.customer !== ALL && rCust !== rSel.customer) return false;
+        // Account Manager
+        if (rSel.am !== ALL && rAM !== rSel.am) return false;
+
+        return true;
+      });
+    }
+
+    /* ---------- Dynamic Options ---------- */
+    function refreshTierOptions(sel){
+      // Build Tier list from rows filtered by Risk only
+      const rowsForTier = filterRows({ risk: sel.risk, tier: ALL, customer: ALL, am: ALL });
+      const tiers = uniqSorted(rowsForTier.map(r => r.tier));
+      const items = [{ value: ALL, label: "All" }].concat(tiers.map(v => ({ value: v, label: v })));
+
+      // Prefer the user selection → 'Receivable' → All
+      const wanted = includesValue(items, sel.tier) ? sel.tier
+                    : includesValue(items, 'Receivable') ? 'Receivable'
+                    : ALL;
+
+      setOptions(tierSel, items, wanted);
+    }
+
+    function refreshDependentOptions(sel){
+      // Customers depend on (Risk, Tier) only
+      const baseForCustomer = filterRows({ risk: sel.risk, tier: sel.tier, customer: ALL, am: ALL });
+      const customers = uniqSorted(baseForCustomer.map(r => r.customer));
+      const custItems = [{ value: ALL, label: "All Customers" }].concat(customers.map(v => ({ value: v, label: v })));
+      const wantedCust = includesValue(custItems, sel.customer) ? sel.customer : ALL;
+      setOptions(customerSel, custItems, wantedCust);
+
+      // AM depends on (Risk, Tier, Customer)
+      const baseForAM = filterRows({ risk: sel.risk, tier: sel.tier, customer: wantedCust, am: ALL });
+      const ams = uniqSorted(baseForAM.map(r => r.accountManager));
+      const amItems = [{ value: ALL, label: "All" }].concat(ams.map(v => ({ value: v, label: v })));
+      const wantedAM = includesValue(amItems, sel.am) ? sel.am : ALL;
+      setOptions(amSel, amItems, wantedAM);
+    }
+
+    /* ---------- Rendering ---------- */
+    function render(){
+      const sel = currentSelection();
+      const rows = filterRows(sel);
+
+      if (dbg) {
+        note.textContent = `Rows: ${rows.length} (project=${dbg.projectId}, dataset=${dbg.dataset}, table=${dbg.table}, location=${dbg.locationUsed})`;
+      }
+
+      if (!rows.length) {
+        result.innerHTML = `<div class="card">No invoices match the selected filters.</div>`;
+        return;
+      }
+
+      const byCustomer = new Map();
+      rows.forEach(r => {
+        const key = r.customer || '(no customer)';
+        if (!byCustomer.has(key)) byCustomer.set(key, []);
+        byCustomer.get(key).push(r);
+      });
+
+      const parts = [];
+      Array.from(byCustomer.keys()).sort((a,b)=>a.localeCompare(b)).forEach(cust => {
+        const list = byCustomer.get(cust).slice().sort((a,b)=>(a.dueDate||"").localeCompare(b.dueDate||""));
+        const rowsHtml = list.map(r => `
+          <tr>
+            <td>${esc(r.invoiceNumber)}</td>
+            <td>${esc(r.contract)}</td>
+            <td>${fmt.date(r.issueDate)}</td>
+            <td>${fmt.date(r.dueDate)}</td>
+            <td>${esc(r.description)}</td>
+            <td>${fmt.money(r.amountUSD)}</td>
+            <td class="balance">${fmt.money(r.balance)}</td>
+          </tr>`).join("");
+
+        parts.push(`
+          <div class="card">
+            <h3>${esc(cust)}</h3>
+            <div class="table-wrap">
+              <table>
+                <colgroup>
+                  <col class="col-inv"><col class="col-ctr"><col class="col-iss"><col class="col-due"><col class="col-desc"><col class="col-amt"><col class="col-bal">
+                </colgroup>
+                <thead>
+                  <tr>
+                    <th>Invoice Number</th>
+                    <th>Contract</th>
+                    <th>Issue Date</th>
+                    <th>Due Date</th>
+                    <th>Description</th>
+                    <th>Amount USD</th>
+                    <th class="balance">Balance</th>
+                  </tr>
+                </thead>
+                <tbody>${rowsHtml}</tbody>
+              </table>
+            </div>
+          </div>`);
+      });
+
+      result.innerHTML = parts.join("");
+    }
+
+    /* ---------- Wiring ---------- */
+    function onFilterChange(){
+      const sel = currentSelection();
+      refreshTierOptions(sel);                 // keep Status list in sync with Risk
+      refreshDependentOptions(currentSelection());
+      render();
+      google.script.run.saveFilterState('invoices', currentSelection());
+    }
+
+    function initFilters(){
+      // Defaults: Risk = Expected (blank risk), Status = Receivable
+      const defaults = {
+        risk: (SAVED && SAVED.risk) || RISK_EXPECTED,
+        tier: (SAVED && SAVED.tier) || 'Receivable',
+        customer: (SAVED && SAVED.customer) || ALL,
+        am: (SAVED && SAVED.am) || ALL
+      };
+
+      // Risk options
+      setOptions(riskSel, [
+        {value: ALL, label: "All"},
+        {value: RISK_EXPECTED, label: "Expected"},
+        {value: "Doubtful", label: "Doubtful"},
+        {value: "NIL Value", label: "NIL Value"}
+      ], defaults.risk);
+
+      // Build Status (Tier) options dynamically from data (respecting Risk)
+      refreshTierOptions(defaults);
+
+      // Build Customer & AM options based on (Risk, Tier)
+      refreshDependentOptions(defaults);
+
+      // Events
+      riskSel.onchange = onFilterChange;
+      tierSel.onchange = onFilterChange;
+      customerSel.onchange = onFilterChange;
+      amSel.onchange = onFilterChange;
+    }
+
+    /* ---------- Load data ---------- */
+    spinner.style.display = 'block';
+    google.script.run
+      .withSuccessHandler(payload => {
+        full = (payload && payload.invoices) ? payload.invoices : [];
+        // normalize fields used in filters
+        full = full.map(r => ({
+          ...r,
+          customer: trim(r.customer),
+          accountManager: trim(r.accountManager),
+          tier: trim(r.tier),
+          risk: trim(r.risk)
+        }));
+        dbg  = payload && payload.debug ? payload.debug : null;
+
+        // then load saved selection
+        google.script.run
+          .withSuccessHandler(state => { SAVED = state || null; initFilters(); render(); spinner.style.display='none'; })
+          .withFailureHandler(_ => { SAVED = null; initFilters(); render(); spinner.style.display='none'; })
+          .loadFilterState('invoices');
+      })
+      .withFailureHandler(err => {
+        spinner.style.display = 'none';
+        result.innerHTML = `<div class="card">Error: ${esc(err && err.message ? err.message : String(err))}</div>`;
+      })
+      .getInvoicesIssued();
+  </script>
+</body>
+</html>
